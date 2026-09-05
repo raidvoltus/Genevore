@@ -3,84 +3,77 @@
 **3D Open-World Mobile Game (Android)**  
 Core Mechanic: **Melahap (Devour) + Limitless Evolution**
 
-Target hardware baseline: Snapdragon 720G / 4 GB RAM.
+Target hardware baseline: Snapdragon 720G / 4 GB RAM / ≤ 1.2 GB VRAM.
 
 ## Status Tracker
 
-- [x] **Tahap 1** — Prototipe Arsitektur & Benchmark Core (Zero-Allocation + Bone Re-Binding)
-- [x] **Tahap 2** — Vertical Slice (Core Loop Sandbox) ← *current*
-- [ ] Tahap 3 — Arsitektur Open-World & Optimasi Mobile
+- [x] **Tahap 1** — Prototipe Arsitektur & Benchmark Core
+- [x] **Tahap 2** — Vertical Slice (Core Loop Sandbox)
+- [x] **Tahap 3** — Arsitektur Open-World & Optimasi Mobile ← *current*
 - [ ] Tahap 4 — Pembangunan Konten & Sistem Balancing
 - [ ] Tahap 5 — Hardening, Profiling Termal & QA
-- [ ] Tahap 6 — Deployment & Release Readiness
+- [ ] Tahap 6 — Deployment & Release Readiness (PR sync ke whatman42)
 
 ---
 
-## Tahap 1 Recap
+## Tahap 3 — World Streaming + Abstract AI + Asset Pipeline
 
-Zero-allocation foundation. See previous commit for `ModuleObjectPool`, `CreatureAssembly`, `GenomeManager`, `DevourController`, `AutomatedBenchmark`.
-
-## Tahap 2 — Vertical Slice (Core Loop Sandbox)
-
-Integrates Stage-1 infrastructure with Mobile Input, autonomous Enemy AI, Combat, and event-driven Genome HUD. Proves continuous play (Explore → Fight → Devour → Mutate) for ≥ 10 minutes without state corruption or memory leaks.
-
-### New Modules
+### Modules
 
 | File | Responsibility |
 |------|----------------|
-| `MobilePlayerController.cs` | CharacterController movement driven by Virtual Joystick. No Rigidbody. Contextual Devour via existing `DevourController`. |
-| `VirtualJoystick.cs` | Lightweight UI joystick; only mutates `anchoredPosition`. |
-| `EnemyAISandbox.cs` | FSM: Wander → Flee (HP < 20%) → Dead. NavMeshAgent with LowQuality avoidance. Implements `IPoolable`; released back to pool after Devour. |
-| `EnemySpawnerSandbox.cs` | Continuous spawn from `ModuleObjectPool` (max 15 alive). |
-| `IDamageable.cs` + `DamageableEntity.cs` + `CombatDamageSystem.cs` | Interface + concrete HP component. Damage resolution uses `StatBlock` only. C# events, no string params, no Lists. |
-| `GenomeHUD.cs` | Event-driven 6-slot UI. Listens to `OnGeneEquipped` / `OnGeneRemoved` / `OnStatsRecalculated`. No per-frame Canvas rebuild. |
-| `GenomeManager.cs` (updated) | Added `EquipGene` / `UnequipGeneAt` + events for Stage-2 UI/combat. Backward-compatible with Stage-1 benchmark. |
+| `WorldChunkManager.cs` | Distance-based chunk load/unload via **Addressables only** (async). Hard cap **≤ 2 concurrent** loads. Queue + hysteresis radii. Supports prefab InstantiateAsync and additive scene LoadSceneAsync. |
+| `AbstractAISimulator.cs` | Dual-layer AI. Physical (pooled GameObject + NavMesh) inside 50 m; abstract `struct` array outside. Simulation via **Burst IJob** (or main-thread interval fallback every 2 s). Materialise/dematerialise with hysteresis. |
+| `AbstractEntityData.cs` | Value-type enemy snapshot (position, HP, state, prefab hash). |
+| `AbstractPopulationSeeder.cs` | Seeds background population into the abstract layer. |
+| `MobileAssetPipeline.md` | Mandatory texture/material/mesh rules (ASTC, GPU Instancing, res limits). |
+| `TextureImportPreset.md` | Concrete importer settings. |
 
-### Exit Criteria (10-minute continuous play)
+### Exit Criteria (device, cross 5 chunks)
 
-- Core Loop stable: ≥ 50 sequential Devours; module swap works; zero NullReferenceException.
-- Memory: GC Alloc ≤ 50 B/frame for UI, **0 B** for gameplay logic hot path.
-- Animation stability: no T-Pose / fatal bone clipping after dozens of equip/unequip cycles.
+- VRAM ≤ **1.2 GB** (no exponential spikes)
+- Chunk-load frame time spike ≤ **16.6 ms** (async, no macro stutter)
+- Batches / Draw Calls ≤ **100** outdoors even with dozens of abstract entities
 
-### Integration Notes & Risk Analysis
+### Race-Condition Analysis (Abstract AI ↔ Main Thread)
 
-1. **NavMesh dependency**  
-   Enemies require a baked NavMesh. If the sandbox scene has none, agents will fail `isOnNavMesh`. Mitigation: bake a simple plane NavMesh in the Vertical Slice scene; agents use LowQuality avoidance to keep CPU cost low on mid-range SoCs.
+**Risk:** Job writes `NativeArray<AbstractEntityData>` while Main Thread materialises / dematerialises and reads the managed mirror.
 
-2. **Pool vs NavMeshAgent**  
-   `NavMeshAgent` is disabled on `OnDespawn` and re-enabled on `OnSpawn` to avoid residual pathing state when the GameObject is reused. This prevents the common “agent teleports after pool recycle” bug.
+**Mitigation applied:**
+1. Job is scheduled only when no previous job is outstanding (`_jobScheduled` gate).
+2. Main Thread calls `_pendingJob.Complete()` (or waits for `IsCompleted`) **before** any read of results or any pool Acquire/Release.
+3. Materialise / Dematerialise touch only the managed dictionary + ModuleObjectPool — never the NativeArray currently owned by a running job.
+4. Double-buffer pattern: managed array is the source of truth for materialisation decisions; NativeArray is a temporary job workspace that is copied back only after Complete.
 
-3. **GenomeManager events**  
-   Stage-1 code still works via the legacy `TryAddGene` path (now routes through `EquipGene`). AutomatedBenchmark continues to function.
+This eliminates data races between background simulation and physical spawn/despawn.
 
-4. **Bone re-binding after many cycles**  
-   Stage-1 already clears `SkinnedMeshRenderer.bones` on release. Stage-2 does not touch assembly logic; risk of T-Pose remains the same (explicit null-out on detach). Confidence that the existing path is sufficient: **90%**.
+### Addressables Integration Notes
+
+- All loads use `Addressables.LoadSceneAsync` / `InstantiateAsync` / `Release` / `UnloadSceneAsync`.
+- No `Resources.Load` or synchronous `Addressables.LoadAssetAsync(...).WaitForCompletion()` on the hot path.
+- Concurrent load gate (`MaxConcurrentLoads = 2`) prevents Addressables callback storms and disk thrashing on mid-range storage.
 
 ### Confidence
 
-- MobilePlayerController + Joystick: **92%**
-- EnemyAISandbox (FSM + pool lifecycle): **88%** (NavMesh bake is the external variable)
-- CombatDamageSystem / IDamageable: **95%**
-- GenomeHUD event-driven path: **93%**
-
-Overall Stage-2 architectural confidence: **90%**.
+| Component | Confidence |
+|-----------|------------|
+| WorldChunkManager (async + queue) | 91% |
+| AbstractAISimulator + Burst Job | 87% (depends on correct Player/Burst package) |
+| Materialise/Dematerialise pool path | 90% |
+| Asset pipeline rules (documentation) | 95% |
+| **Overall Stage 3** | **89%** |
 
 ### Folder Layout (additive)
 
 ```
 Assets/Scripts/
-  Player/
-    MobilePlayerController.cs
-  Enemy/
-    EnemyAISandbox.cs
-    EnemySpawnerSandbox.cs
-  Combat/
-    IDamageable.cs          (also under Interfaces)
-    DamageableEntity.cs
-    CombatDamageSystem.cs
-  UI/
-    VirtualJoystick.cs
-    GenomeHUD.cs
-  Core/
-    GenomeManager.cs        (updated with events)
+  World/
+    WorldChunkManager.cs
+  AI/
+    AbstractEntityData.cs
+    AbstractAISimulator.cs
+    AbstractPopulationSeeder.cs
+  Optimization/
+    MobileAssetPipeline.md
+    TextureImportPreset.md
 ```
