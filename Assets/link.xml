@@ -1,0 +1,17 @@
+<linker>
+  <assembly fullname="Assembly-CSharp">
+    <type fullname="Genevore.Data.GeneDataSO" preserve="all"/>
+    <type fullname="Genevore.Data.BodyModuleSO" preserve="all"/>
+    <type fullname="Genevore.Data.GeneCatalogSO" preserve="all"/>
+    <type fullname="Genevore.Data.GeneDatabase" preserve="all"/>
+    <type fullname="Genevore.Data.GeneDatabase/GeneMeta" preserve="all"/>
+    <type fullname="Genevore.Data.StatBlock" preserve="all"/>
+    <type fullname="Genevore.Cloud.CloudSaveSync" preserve="all"/>
+    <type fullname="Genevore.Cloud.CloudSaveSync/CloudPayload" preserve="all"/>
+    <type fullname="Genevore.Security.ObfuscatedFloat" preserve="all"/>
+    <type fullname="Genevore.Stability.AppLifecycleHandler" preserve="all"/>
+    <type fullname="Genevore.Stability.AppLifecycleHandler/PlayerSnapshot" preserve="all"/>
+  </assembly>
+  <assembly fullname="Unity.Addressables" preserve="all"/>
+  <assembly fullname="Unity.ResourceManager" preserve="all"/>
+</linker>
