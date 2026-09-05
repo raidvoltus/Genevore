@@ -7,6 +7,7 @@ namespace Genevore.Core
     /// Manages genetic mutations using ScriptableObject data.
     /// Max 6 gene slots. Static array only (no List&lt;T&gt;).
     /// All stat calculations use value-type Struct (StatBlock) — zero heap allocation.
+    /// Stage 2: Event-driven notifications for HUD and combat systems.
     /// </summary>
     public class GenomeManager : MonoBehaviour
     {
@@ -21,6 +22,22 @@ namespace Genevore.Core
 
         private StatBlock _cachedTotalStats;
         private bool _statsDirty = true;
+
+        /// <summary>
+        /// Raised after any gene change that causes stats to be recalculated.
+        /// GenomeHUD and DamageableEntity subscribe. Zero string parameters.
+        /// </summary>
+        public event System.Action OnStatsRecalculated;
+
+        /// <summary>
+        /// Raised when a gene is successfully equipped. Args: slotIndex, gene.
+        /// </summary>
+        public event System.Action<int, GeneDataSO> OnGeneEquipped;
+
+        /// <summary>
+        /// Raised when a gene is removed. Args: slotIndex.
+        /// </summary>
+        public event System.Action<int> OnGeneRemoved;
 
         public StatBlock TotalStats
         {
@@ -37,11 +54,47 @@ namespace Genevore.Core
         public int GeneCount => _geneCount;
 
         /// <summary>
-        /// Attempt to add a gene by id. Returns false if slots full or gene not found.
+        /// Preferred Stage-2 API. Adds gene and raises events.
         /// </summary>
-        public bool TryAddGene(int geneId)
+        public bool EquipGene(int geneId)
+        {
+            bool success = TryAddGeneInternal(geneId);
+            if (success)
+            {
+                int slot = _geneCount - 1;
+                var gene = _activeGenes[slot];
+                OnGeneEquipped?.Invoke(slot, gene);
+                NotifyStatsChanged();
+            }
+            return success;
+        }
+
+        /// <summary>
+        /// Preferred Stage-2 API. Removes gene and raises events.
+        /// </summary>
+        public bool UnequipGeneAt(int slot)
+        {
+            bool success = RemoveGeneAtInternal(slot);
+            if (success)
+            {
+                OnGeneRemoved?.Invoke(slot);
+                NotifyStatsChanged();
+            }
+            return success;
+        }
+
+        /// <summary>
+        /// Legacy / internal path used by Stage-1 AutomatedBenchmark.
+        /// Still functional; events are raised when called via EquipGene.
+        /// </summary>
+        public bool TryAddGene(int geneId) => EquipGene(geneId);
+
+        public bool RemoveGeneAt(int slot) => UnequipGeneAt(slot);
+
+        private bool TryAddGeneInternal(int geneId)
         {
             if (_geneCount >= MaxGeneSlots) return false;
+            if (availableGenes == null) return false;
 
             GeneDataSO gene = null;
             for (int i = 0; i < availableGenes.Length; i++)
@@ -61,10 +114,7 @@ namespace Genevore.Core
             return true;
         }
 
-        /// <summary>
-        /// Remove gene at slot. Shifts remaining genes down (no allocation).
-        /// </summary>
-        public bool RemoveGeneAt(int slot)
+        private bool RemoveGeneAtInternal(int slot)
         {
             if (slot < 0 || slot >= _geneCount) return false;
 
@@ -86,6 +136,7 @@ namespace Genevore.Core
             }
             _geneCount = 0;
             _statsDirty = true;
+            NotifyStatsChanged();
         }
 
         private void RecalculateStats()
@@ -101,6 +152,13 @@ namespace Genevore.Core
             _statsDirty = false;
         }
 
+        private void NotifyStatsChanged()
+        {
+            // Ensure cache is warm before listeners read TotalStats
+            var _ = TotalStats;
+            OnStatsRecalculated?.Invoke();
+        }
+
         public GeneDataSO GetGeneAt(int slot)
         {
             if (slot < 0 || slot >= _geneCount) return null;
@@ -109,6 +167,7 @@ namespace Genevore.Core
 
         public int GetModuleHashForGene(int geneId)
         {
+            if (availableGenes == null) return 0;
             for (int i = 0; i < availableGenes.Length; i++)
             {
                 if (availableGenes[i] != null && availableGenes[i].GeneId == geneId)
@@ -131,7 +190,7 @@ namespace Genevore.Core
             var gene = availableGenes[idx];
             if (gene == null) return false;
 
-            return TryAddGene(gene.GeneId);
+            return EquipGene(gene.GeneId);
         }
     }
 }
