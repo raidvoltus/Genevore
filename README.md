@@ -3,77 +3,79 @@
 **3D Open-World Mobile Game (Android)**  
 Core Mechanic: **Melahap (Devour) + Limitless Evolution**
 
-Target hardware baseline: Snapdragon 720G / 4 GB RAM / ≤ 1.2 GB VRAM.
+Target: Snapdragon 720G / 4 GB RAM / ≤ 1.2 GB VRAM.
 
 ## Status Tracker
 
-- [x] **Tahap 1** — Prototipe Arsitektur & Benchmark Core
-- [x] **Tahap 2** — Vertical Slice (Core Loop Sandbox)
-- [x] **Tahap 3** — Arsitektur Open-World & Optimasi Mobile ← *current*
-- [ ] Tahap 4 — Pembangunan Konten & Sistem Balancing
+- [x] Tahap 1 — Prototipe Arsitektur & Benchmark Core
+- [x] Tahap 2 — Vertical Slice (Core Loop Sandbox)
+- [x] Tahap 3 — Arsitektur Open-World & Optimasi Mobile
+- [x] **Tahap 4 — Pembangunan Konten & Sistem Balancing** ← *current*
 - [ ] Tahap 5 — Hardening, Profiling Termal & QA
-- [ ] Tahap 6 — Deployment & Release Readiness (PR sync ke whatman42)
+- [ ] Tahap 6 — Deployment & Release Readiness
 
 ---
 
-## Tahap 3 — World Streaming + Abstract AI + Asset Pipeline
+## Tahap 4 — Content & Balancing Systems
 
 ### Modules
 
 | File | Responsibility |
 |------|----------------|
-| `WorldChunkManager.cs` | Distance-based chunk load/unload via **Addressables only** (async). Hard cap **≤ 2 concurrent** loads. Queue + hysteresis radii. Supports prefab InstantiateAsync and additive scene LoadSceneAsync. |
-| `AbstractAISimulator.cs` | Dual-layer AI. Physical (pooled GameObject + NavMesh) inside 50 m; abstract `struct` array outside. Simulation via **Burst IJob** (or main-thread interval fallback every 2 s). Materialise/dematerialise with hysteresis. |
-| `AbstractEntityData.cs` | Value-type enemy snapshot (position, HP, state, prefab hash). |
-| `AbstractPopulationSeeder.cs` | Seeds background population into the abstract layer. |
-| `MobileAssetPipeline.md` | Mandatory texture/material/mesh rules (ASTC, GPU Instancing, res limits). |
-| `TextureImportPreset.md` | Concrete importer settings. |
+| `BiomassMetabolism.cs` | Metabolic decay balancer. Non-linear drain curve forces hunting. Move-speed penalty scales with biomass. |
+| `ProceduralScaleAdapter.cs` | Resizes CharacterController (height/radius/center) with gene count / scale. Primitive colliders only. Ground correction + ComputePenetration anti-clip. |
+| `GeneDatabase.cs` + `GeneCatalogSO` | Metadata-only registry (50+ genes). Addressables for catalog + on-demand BodyModuleSO. No synchronous visual loads. |
+| `MobilePlayerController.cs` (updated) | Implements `IMetabolismSpeedReceiver` for runtime speed override. |
 
-### Exit Criteria (device, cross 5 chunks)
+### Metabolic Decay Formula (pseudo-code)
 
-- VRAM ≤ **1.2 GB** (no exponential spikes)
-- Chunk-load frame time spike ≤ **16.6 ms** (async, no macro stutter)
-- Batches / Draw Calls ≤ **100** outdoors even with dozens of abstract entities
+```csharp
+// biomass >= minBiomassClamp (0.5)  → never zero / negative
+float b      = max(minBiomassClamp, biomass);
+float excess = max(0, b - 1);
 
-### Race-Condition Analysis (Abstract AI ↔ Main Thread)
+// Slow exponential, hard-capped
+float arg    = min(decayExponent * excess * 0.15, 8.0);  // prevent exp overflow
+float mult   = min(exp(arg), maxDrainMultiplier);        // e.g. max 12×
+float drain  = max(0, baseDrainPerSecond * mult);        // HP/sec
 
-**Risk:** Job writes `NativeArray<AbstractEntityData>` while Main Thread materialises / dematerialises and reads the managed mirror.
+// Move speed (hyperbolic, denom always ≥ 1)
+float speed  = max(minMoveSpeed, baseMoveSpeed / (1 + speedPenaltyK * excess));
+```
 
-**Mitigation applied:**
-1. Job is scheduled only when no previous job is outstanding (`_jobScheduled` gate).
-2. Main Thread calls `_pendingJob.Complete()` (or waits for `IsCompleted`) **before** any read of results or any pool Acquire/Release.
-3. Materialise / Dematerialise touch only the managed dictionary + ModuleObjectPool — never the NativeArray currently owned by a running job.
-4. Double-buffer pattern: managed array is the source of truth for materialisation decisions; NativeArray is a temporary job workspace that is copied back only after Complete.
+**Safety analysis**
+- No divide-by-zero: denominator `1 + k*excess` ≥ 1; biomass clamped > 0.
+- No negative drain: `max(0, …)`.
+- No exp overflow: argument clamped to 8 before `Exp`.
+- No underflow to NaN: all inputs finite floats from clamped sources.
 
-This eliminates data races between background simulation and physical spawn/despawn.
+**Design target:** At theoretical Apex biomass, full-HP idle survival ≤ **180 s** (3 minutes). Tunable via `baseDrainPerSecond`, `decayExponent`, `maxDrainMultiplier`.
 
-### Addressables Integration Notes
+### Physics Integrity
 
-- All loads use `Addressables.LoadSceneAsync` / `InstantiateAsync` / `Release` / `UnloadSceneAsync`.
-- No `Resources.Load` or synchronous `Addressables.LoadAssetAsync(...).WaitForCompletion()` on the hot path.
-- Concurrent load gate (`MaxConcurrentLoads = 2`) prevents Addressables callback storms and disk thrashing on mid-range storage.
+- CharacterController only (Capsule). **No MeshCollider**.
+- On scale change: disable CC → write height/radius/center → re-enable → raycast ground probe → lift feet → optional `Physics.ComputePenetration` lateral resolve.
+- `DebugForceScaleSteps(20)` helper for exit-criteria stress (20 sequential scale-ups).
+
+### GeneDatabase Memory
+
+- Boot path loads **metadata only** (`GeneMeta` structs + small strings) into `Dictionary<int, GeneMeta>`.
+- Visual `BodyModuleSO` loaded via Addressables **only on equip**.
+- 50 entries estimated ≪ 2 MB (typically < 50 KB metadata).
+
+### Exit Criteria
+
+| Metric | Target |
+|--------|--------|
+| Apex idle survival (no hunting) | ≤ 3 minutes |
+| Clipping incidents over 20 sequential scale-ups | **0** |
+| Gene metadata RAM (50 entries) at init | **< 2 MB** |
 
 ### Confidence
 
-| Component | Confidence |
-|-----------|------------|
-| WorldChunkManager (async + queue) | 91% |
-| AbstractAISimulator + Burst Job | 87% (depends on correct Player/Burst package) |
-| Materialise/Dematerialise pool path | 90% |
-| Asset pipeline rules (documentation) | 95% |
-| **Overall Stage 3** | **89%** |
-
-### Folder Layout (additive)
-
-```
-Assets/Scripts/
-  World/
-    WorldChunkManager.cs
-  AI/
-    AbstractEntityData.cs
-    AbstractAISimulator.cs
-    AbstractPopulationSeeder.cs
-  Optimization/
-    MobileAssetPipeline.md
-    TextureImportPreset.md
-```
+| Component | % |
+|-----------|---|
+| BiomassMetabolism math + safety | 94% |
+| ProceduralScaleAdapter anti-clip | 90% |
+| GeneDatabase metadata / Addressables | 92% |
+| **Overall Stage 4** | **91%** |

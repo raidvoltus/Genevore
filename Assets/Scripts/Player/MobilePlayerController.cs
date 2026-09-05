@@ -1,16 +1,16 @@
 using UnityEngine;
 using Genevore.Core;
 using Genevore.Combat;
+using Genevore.Systems;
 
 namespace Genevore.Player
 {
     /// <summary>
     /// Mobile movement via Virtual Joystick (UI) + CharacterController.
-    /// Avoids Rigidbody to minimise physics CPU overhead on mid-range Android.
-    /// Integrates contextual Devour trigger with DevourController from Stage 1.
+    /// Stage 4: implements IMetabolismSpeedReceiver for BiomassMetabolism penalties.
     /// </summary>
     [RequireComponent(typeof(CharacterController))]
-    public class MobilePlayerController : MonoBehaviour
+    public class MobilePlayerController : MonoBehaviour, IMetabolismSpeedReceiver
     {
         [Header("Movement")]
         [SerializeField] private float moveSpeed = 5f;
@@ -21,17 +21,27 @@ namespace Genevore.Player
         [SerializeField] private DevourController devourController;
         [SerializeField] private GenomeManager genomeManager;
         [SerializeField] private DamageableEntity damageable;
-        [SerializeField] private Transform cameraTransform; // optional; for relative movement
+        [SerializeField] private Transform cameraTransform;
 
-        // Virtual joystick input (set by UI Joystick script or external)
         private Vector2 _moveInput;
         private CharacterController _cc;
         private float _verticalVelocity;
+        private float _metabolismSpeedOverride = -1f;
 
         public Vector2 MoveInput
         {
             get => _moveInput;
             set => _moveInput = value;
+        }
+
+        public void SetMetabolismMoveSpeed(float speed)
+        {
+            _metabolismSpeedOverride = speed;
+        }
+
+        public float GetEffectiveMoveSpeed()
+        {
+            return _metabolismSpeedOverride > 0f ? _metabolismSpeedOverride : moveSpeed;
         }
 
         private void Awake()
@@ -50,10 +60,7 @@ namespace Genevore.Player
         private void Update()
         {
             if (damageable != null && !damageable.IsAlive) return;
-
             ApplyMovement();
-            // DevourController runs its own Update FSM; we only feed position.
-            // Contextual devour is already handled inside DevourController via OverlapSphereNonAlloc.
         }
 
         private void ApplyMovement()
@@ -61,7 +68,6 @@ namespace Genevore.Player
             Vector3 inputDir = new Vector3(_moveInput.x, 0f, _moveInput.y);
             if (inputDir.sqrMagnitude > 1f) inputDir.Normalize();
 
-            // Camera-relative if available, else world
             Vector3 worldDir;
             if (cameraTransform != null)
             {
@@ -78,14 +84,12 @@ namespace Genevore.Player
                 worldDir = inputDir;
             }
 
-            // Rotate toward movement
             if (worldDir.sqrMagnitude > 0.01f)
             {
                 Quaternion targetRot = Quaternion.LookRotation(worldDir);
                 transform.rotation = Quaternion.Slerp(transform.rotation, targetRot, rotationSpeed * Time.deltaTime);
             }
 
-            // Gravity
             if (_cc.isGrounded && _verticalVelocity < 0f)
             {
                 _verticalVelocity = -2f;
@@ -95,21 +99,16 @@ namespace Genevore.Player
                 _verticalVelocity += gravity * Time.deltaTime;
             }
 
-            Vector3 motion = worldDir * moveSpeed + Vector3.up * _verticalVelocity;
+            float speed = GetEffectiveMoveSpeed();
+            Vector3 motion = worldDir * speed + Vector3.up * _verticalVelocity;
             _cc.Move(motion * Time.deltaTime);
         }
 
-        /// <summary>
-        /// Called by VirtualJoystick UI component every frame (or on value change).
-        /// </summary>
         public void SetJoystickInput(Vector2 input)
         {
             _moveInput = input;
         }
 
-        /// <summary>
-        /// Optional manual devour button (UI). Forces the Stage-1 FSM into Executing.
-        /// </summary>
         public void RequestDevour()
         {
             if (devourController != null)
